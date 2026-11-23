@@ -1,0 +1,5 @@
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.32,<0.35
+motor>=3.6,<3.8
+redis>=5.2,<6
+pydantic-settings>=2.6,<3
