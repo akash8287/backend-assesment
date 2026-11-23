@@ -1,3 +1,5 @@
+"""Background worker for the processing stage and the enriching stage."""
+
 import asyncio
 import logging
 import random
@@ -17,12 +19,21 @@ logger = logging.getLogger(__name__)
 
 
 class StageFailure(Exception):
+    """One simulated attempt of a stage failed and may be retried."""
+
     def __init__(self, stage: str) -> None:
         self.stage = stage
         super().__init__(stage)
 
 
 class PipelineRunner:
+    """Claim documents and run each stage without blocking the request path.
+
+    A result is written only when the claim token and the content version
+    captured for that attempt are still current. Enriching reads the summary
+    and does not repeat processing when it fails.
+    """
+
     def __init__(
         self,
         repository: DocumentRepository,
@@ -39,6 +50,7 @@ class PipelineRunner:
         self._rng = random.Random()
 
     async def start(self) -> None:
+        """Start one claim loop per configured worker."""
         for index in range(self._settings.worker_concurrency):
             task = asyncio.create_task(self._loop(), name=f"pipeline-{index}")
             self._tasks.append(task)
@@ -50,6 +62,7 @@ class PipelineRunner:
         )
 
     async def stop(self) -> None:
+        """Ask the loops to stop and wait for the current sleep or claim to finish."""
         self._stop.set()
         if not self._tasks:
             return
@@ -57,6 +70,7 @@ class PipelineRunner:
         self._tasks.clear()
 
     async def _loop(self) -> None:
+        """Claim work until the runner is stopped. A tick error is logged and the loop continues."""
         while not self._stop.is_set():
             try:
                 worked = await self._tick()
@@ -67,6 +81,7 @@ class PipelineRunner:
                 return
 
     async def _tick(self) -> bool:
+        """Run one claim. Return False when nothing was ready."""
         now = utcnow()
         expires = now + timedelta(seconds=self._settings.pipeline_claim_lease_seconds)
         max_attempts = self._settings.pipeline_max_attempts
@@ -123,6 +138,11 @@ class PipelineRunner:
         return False
 
     async def _run_processing(self, document: dict) -> None:
+        """Write the summary for the claimed version, then run enriching.
+
+        A version change or a lost claim discards the summary instead of
+        attaching it to newer content.
+        """
         version = document["content_version"]
         digest = document["content_hash"]
         token = document["claim_token"]
@@ -164,6 +184,11 @@ class PipelineRunner:
         await self._run_enriching(updated)
 
     async def _run_enriching(self, document: dict) -> None:
+        """Write tags derived from this version's summary.
+
+        The summary is used only when its version and hash match. Failure
+        leaves that summary in place and retries enriching alone.
+        """
         version = document["content_version"]
         digest = document["content_hash"]
         token = document["claim_token"]
@@ -226,6 +251,7 @@ class PipelineRunner:
         log(logger, logging.INFO, "document completed", document_id=str(document_id), content_version=version)
 
     async def _fail_processing(self, document: dict, attempt: int) -> None:
+        """Requeue processing with backoff, or mark the stage failed when attempts are spent."""
         version = document["content_version"]
         document_id = document["_id"]
         if attempt >= self._settings.pipeline_max_attempts:
@@ -267,6 +293,7 @@ class PipelineRunner:
             log(logger, logging.INFO, "processing scheduled for retry", document_id=str(document_id), attempt=attempt, backoff_seconds=delay)
 
     async def _fail_enriching(self, document: dict, attempt: int) -> None:
+        """Retry enriching without clearing the summary, or fail that stage."""
         version = document["content_version"]
         document_id = document["_id"]
         if attempt >= self._settings.pipeline_max_attempts:
@@ -314,6 +341,11 @@ class PipelineRunner:
             log(logger, logging.INFO, "enriching scheduled for retry", document_id=str(document_id), attempt=attempt, backoff_seconds=delay)
 
     async def _wait_stage(self, stage: str) -> bool:
+        """Sleep for the simulated stage duration.
+
+        Returns False when shutdown interrupts the sleep. Raises StageFailure
+        when this attempt is chosen to fail.
+        """
         if stage == "processing":
             rate = self._settings.pipeline_processing_failure_rate
             low = self._settings.pipeline_processing_min_seconds
@@ -328,9 +360,11 @@ class PipelineRunner:
         return await self._sleep(delay)
 
     def _backoff(self, attempt: int) -> float:
+        """Exponential delay before the next attempt of a failed stage."""
         return self._settings.pipeline_retry_backoff_seconds * (2 ** max(attempt - 1, 0))
 
     async def _sleep(self, seconds: float) -> bool:
+        """Wait for seconds, or return False immediately when the runner is stopping."""
         if seconds <= 0:
             return not self._stop.is_set()
         try:

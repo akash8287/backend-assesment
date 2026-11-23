@@ -1,3 +1,5 @@
+"""Per-user cap on documents in the active pipeline."""
+
 import asyncio
 import logging
 import time
@@ -118,6 +120,11 @@ class RateLimiter:
 
     @asynccontextmanager
     async def hold(self, user_id: str) -> AsyncIterator[bool]:
+        """Hold the per-user admission lock.
+
+        Yields True when this caller holds it. Yields False when Redis is
+        unavailable, so the caller can count active documents in MongoDB.
+        """
         token = await self._lock(user_id)
         try:
             yield token is not None
@@ -126,6 +133,11 @@ class RateLimiter:
                 await self._unlock(user_id, token)
 
     async def admit(self, user_id: str, document_id: str, version: int) -> str:
+        """Reserve or refresh this document's active slot for version.
+
+        Returns rejected at the cap, refreshed when the document was already
+        active, or added when a new slot was taken. Caller must hold the user lock.
+        """
         now = time.time()
         try:
             code = await self._client.eval(
@@ -149,6 +161,7 @@ class RateLimiter:
         return "added"
 
     async def retire(self, user_id: str, document_id: str, version: int) -> None:
+        """Drop the slot only when Redis still records this content version."""
         try:
             await self._client.eval(
                 _RELEASE,
@@ -169,6 +182,10 @@ class RateLimiter:
             )
 
     async def release(self, user_id: str, document_id: str, version: int) -> None:
+        """Release a finished version under the per-user lock.
+
+        Used by the worker after a terminal write. A newer version is left in place.
+        """
         try:
             async with self.hold(user_id) as locked:
                 if locked:
@@ -184,6 +201,11 @@ class RateLimiter:
             )
 
     async def touch(self, user_id: str, document_id: str, version: int) -> bool:
+        """Extend the lease for the version this worker is running.
+
+        Returns False when the stored version has moved. A Redis error returns
+        True so a cache outage does not abort a stage the claim still owns.
+        """
         try:
             async with self.hold(user_id) as locked:
                 if not locked:
@@ -203,6 +225,7 @@ class RateLimiter:
         return int(code) == 1
 
     async def _lock(self, user_id: str) -> str | None:
+        """Acquire the user lock. None means Redis is down. Busy past the wait raises UnavailableError."""
         token = uuid.uuid4().hex
         key = self._lock_key(user_id)
         deadline = time.monotonic() + self._lock_wait_seconds
@@ -219,6 +242,7 @@ class RateLimiter:
             await asyncio.sleep(0.02)
 
     async def _unlock(self, user_id: str, token: str) -> None:
+        """Release the user lock only when token is still the current owner."""
         try:
             await self._client.eval(_UNLOCK, 1, self._lock_key(user_id), token)
         except RedisError:

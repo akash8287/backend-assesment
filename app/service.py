@@ -1,3 +1,9 @@
+"""Submit, replace, and read documents.
+
+A repeated external ref and a content patch share one versioned update.
+Identical content is completed from the cache and does not enter the pipeline.
+"""
+
 import logging
 from typing import Any
 
@@ -21,6 +27,12 @@ logger = logging.getLogger(__name__)
 
 
 class DocumentService:
+    """Document use cases for one request.
+
+    Reads are limited to the user who submitted the document. A write that
+    enters the pipeline takes one active slot for that user. A cache hit does not.
+    """
+
     def __init__(
         self,
         repository: DocumentRepository,
@@ -34,6 +46,10 @@ class DocumentService:
         self._settings = settings
 
     async def submit(self, payload: DocumentCreate) -> tuple[dict[str, Any], bool]:
+        """Create a document, or apply the repeat rules for an existing ref.
+
+        The boolean is true only when a new document id was inserted.
+        """
         digest = content_hash(payload.content)
         if payload.client_doc_ref is not None:
             existing = await self._repository.find_by_ref(payload.client_doc_ref)
@@ -90,13 +106,24 @@ class DocumentService:
         content: str,
         expected_content_version: int | None,
     ) -> dict[str, Any]:
+        """Replace content owned by user_id and reprocess it from scratch.
+
+        expected_content_version must match the stored version when it is
+        provided. The same content is returned unchanged and does not bump
+        the version.
+        """
         current = await self._owned(self._parse_id(document_id), user_id)
         return await self._replace(current, user_id, content, expected_content_version)
 
     async def get(self, document_id: str, user_id: str) -> dict[str, Any]:
+        """Return the caller's document. Missing and other owners both raise NotFoundError."""
         return await self._owned(self._parse_id(document_id), user_id)
 
     async def get_by_ref(self, client_doc_ref: str, user_id: str) -> dict[str, Any]:
+        """Return the caller's document for an external ref.
+
+        An unknown ref and another user's ref both raise NotFoundError.
+        """
         document = await self._repository.find_by_ref(client_doc_ref)
         if document is None or document["user_id"] != user_id:
             raise NotFoundError()
@@ -109,6 +136,7 @@ class DocumentService:
         page: int,
         page_size: int,
     ) -> tuple[list[dict[str, Any]], int]:
+        """Return one page of the caller's documents, newest first, and the total."""
         skip = (page - 1) * page_size
         return await self._repository.list_for_user(user_id, status, skip, page_size)
 
@@ -118,6 +146,11 @@ class DocumentService:
         payload: DocumentCreate,
         digest: str,
     ) -> dict[str, Any]:
+        """Replay or replace the document that already owns this client_doc_ref.
+
+        Same content returns the current row. Different content is a new
+        version of that same document. Another user's ref raises ConflictError.
+        """
         if existing["user_id"] != payload.user_id:
             raise ConflictError("client_doc_ref is already associated with another user")
         if existing["content_hash"] == digest:
@@ -158,6 +191,12 @@ class DocumentService:
         content: str,
         expected_content_version: int | None,
     ) -> dict[str, Any]:
+        """Store new content at the next version and queue it, or complete it from cache.
+
+        The write matches the version observed under the per-user lock. A
+        concurrent update wins, and the loser raises ConflictError without
+        leaving a slot on the wrong version.
+        """
         digest = content_hash(content)
         async with self._limiter.hold(user_id) as locked:
             current = await self._repository.find_by_id(document["_id"])
@@ -227,6 +266,11 @@ class DocumentService:
             return updated
 
     async def _reusable(self, digest: str) -> tuple[str, list[str]] | None:
+        """Return a summary and tags already computed for this exact content.
+
+        Redis is checked first. A miss looks for a completed document whose
+        own artifacts match this hash, then refills Redis.
+        """
         cached = await self._cache.get(digest)
         if cached is not None:
             return cached
@@ -246,6 +290,12 @@ class DocumentService:
         version: int,
         already_active: bool,
     ) -> str:
+        """Reserve an active slot for this document version.
+
+        Returns added, refreshed, or rejected. An already active document
+        refreshes the slot it holds. If Redis cannot decide, the count of
+        active documents in MongoDB is used instead.
+        """
         if locked:
             try:
                 return await self._limiter.admit(user_id, document_id, version)
@@ -260,6 +310,7 @@ class DocumentService:
         return "added"
 
     async def _retire(self, locked: bool, user_id: str, document_id: str, version: int) -> None:
+        """Release a slot reserved for version when the matching write did not commit."""
         if locked:
             await self._limiter.retire(user_id, document_id, version)
 
@@ -270,6 +321,7 @@ class DocumentService:
         document_id: ObjectId,
         attempted_version: int,
     ) -> None:
+        """Point the active slot at the version that is actually stored after a lost update."""
         if not locked:
             return
         await self._limiter.retire(user_id, str(document_id), attempted_version)
@@ -278,6 +330,7 @@ class DocumentService:
             await self._limiter.admit(user_id, str(document_id), current["content_version"])
 
     async def _require_ref(self, client_doc_ref: str | None) -> dict[str, Any]:
+        """Reload the document that won a unique-ref race."""
         if client_doc_ref is None:
             raise ConflictError("document identity conflict")
         existing = await self._repository.find_by_ref(client_doc_ref)
@@ -286,6 +339,7 @@ class DocumentService:
         return existing
 
     async def _owned(self, document_id: ObjectId, user_id: str) -> dict[str, Any]:
+        """Return the document when user_id submitted it, otherwise raise NotFoundError."""
         document = await self._repository.find_by_id(document_id)
         if document is None or document["user_id"] != user_id:
             raise NotFoundError()
@@ -293,6 +347,7 @@ class DocumentService:
 
     @staticmethod
     def _parse_id(document_id: str) -> ObjectId:
+        """Parse a document id. An invalid id raises NotFoundError, same as a missing one."""
         if not ObjectId.is_valid(document_id):
             raise NotFoundError()
         return ObjectId(document_id)
@@ -304,6 +359,7 @@ class DocumentService:
         reusable: tuple[str, list[str]] | None,
         document_id: ObjectId | None = None,
     ) -> dict[str, Any]:
+        """Build a new version-1 document, completed when reusable results were supplied."""
         now = utcnow()
         version = 1
         if reusable is None:
@@ -340,6 +396,7 @@ class DocumentService:
 
     @staticmethod
     def _pipeline_updates(content: str, digest: str, version: int) -> dict[str, Any]:
+        """Fields that clear both artifacts and queue a run for the new version."""
         return {
             "content": content,
             "content_hash": digest,
@@ -361,6 +418,7 @@ class DocumentService:
         summary: str,
         tags: list[str],
     ) -> dict[str, Any]:
+        """Fields that store cached artifacts stamped with the new version."""
         return {
             "content": content,
             "content_hash": digest,

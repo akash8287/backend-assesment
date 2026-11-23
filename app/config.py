@@ -1,3 +1,5 @@
+"""Process settings loaded from the environment."""
+
 from functools import lru_cache
 
 from pydantic import Field, model_validator
@@ -5,6 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Runtime configuration. Environment variables override these defaults."""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -41,6 +45,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def check_stage_ranges(self) -> "Settings":
+        """Reject a stage whose minimum simulated duration is above its maximum."""
         if self.pipeline_processing_min_seconds > self.pipeline_processing_max_seconds:
             raise ValueError("pipeline processing min seconds exceeds max")
         if self.pipeline_enriching_min_seconds > self.pipeline_enriching_max_seconds:
@@ -50,4 +55,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """Return the process settings. Repeated calls reuse the first result."""
     return Settings()

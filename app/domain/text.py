@@ -1,3 +1,5 @@
+"""Deterministic stand-ins for the summary and tag stages."""
+
 import re
 
 _TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9']{2,}")
@@ -32,6 +34,7 @@ _STOP = frozenset(
 
 
 def build_summary(content: str) -> str:
+    """Build a summary from the content alone. The same bytes always produce the same text."""
     compact = " ".join(content.split())
     words = compact.split()
     excerpt = compact[:280]
@@ -39,6 +42,10 @@ def build_summary(content: str) -> str:
 
 
 def build_tags(content: str, summary: str) -> list[str]:
+    """Build tags from the content and the summary text produced by the first stage.
+
+    The last tag records the summary length, so tags change when the summary does.
+    """
     counts: dict[str, int] = {}
     for token in _TOKEN.findall(content.lower()):
         if token in _STOP:

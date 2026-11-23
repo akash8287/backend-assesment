@@ -1,3 +1,5 @@
+"""Pipeline states and the patterns accepted for user and partner ids."""
+
 from typing import Literal
 
 Status = Literal["queued", "processing", "enriching", "completed", "failed"]

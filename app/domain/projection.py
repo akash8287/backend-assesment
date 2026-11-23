@@ -1,8 +1,11 @@
+"""Reader view of a document. Derived fields from another version are omitted."""
+
 from collections.abc import Mapping
 from typing import Any
 
 
 def _matches(artifact: Any, version: int, content_hash: str) -> bool:
+    """True when the artifact was computed from this version and this content hash."""
     return (
         isinstance(artifact, dict)
         and artifact.get("content_version") == version
@@ -11,6 +14,11 @@ def _matches(artifact: Any, version: int, content_hash: str) -> bool:
 
 
 def _stage_view(doc: Mapping[str, Any], name: str, version: int, artifact_visible: bool) -> dict[str, Any]:
+    """Stage progress for the current version.
+
+    A record from another version, or a success whose artifact is not visible,
+    is reported as pending so the caller cannot see a finished stage without its result.
+    """
     stages = doc.get("stages")
     raw = stages.get(name) if isinstance(stages, dict) else None
     if not isinstance(raw, dict) or raw.get("content_version") != version:

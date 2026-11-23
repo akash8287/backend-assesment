@@ -1,3 +1,5 @@
+"""MongoDB connection and the indexes the API queries through."""
+
 import logging
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection
@@ -41,12 +43,15 @@ INDEXES = [
 
 
 class MongoDatabase:
+    """Owns the Motor client and creates document indexes on connect."""
+
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self.client: AsyncIOMotorClient | None = None
         self.db = None
 
     async def connect(self) -> None:
+        """Ping MongoDB and ensure indexes. A failure aborts startup."""
         self.client = AsyncIOMotorClient(
             self._settings.mongo_uri,
             tz_aware=True,
@@ -57,16 +62,19 @@ class MongoDatabase:
         await self.documents.create_indexes(INDEXES)
 
     async def close(self) -> None:
+        """Close the client if connect succeeded."""
         if self.client is not None:
             self.client.close()
 
     @property
     def documents(self) -> AsyncIOMotorCollection:
+        """Return the documents collection. Raises if connect has not finished."""
         if self.db is None:
             raise RuntimeError("MongoDB is not connected")
         return self.db[DOCUMENTS]
 
     async def ping(self) -> bool:
+        """Return whether MongoDB answers. Logs and returns False on error."""
         if self.client is None:
             return False
         try:

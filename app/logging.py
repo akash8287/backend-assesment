@@ -1,3 +1,5 @@
+"""JSON logs with structured fields attached by the caller."""
+
 import json
 import logging
 import sys
@@ -6,6 +8,8 @@ from typing import Any
 
 
 class JsonFormatter(logging.Formatter):
+    """One JSON object per log record, including any fields passed to log()."""
+
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -22,6 +26,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(level: str) -> None:
+    """Send JSON logs to stdout and quiet the default uvicorn access logger."""
     root = logging.getLogger()
     root.handlers.clear()
     handler = logging.StreamHandler(sys.stdout)
@@ -32,4 +37,5 @@ def configure_logging(level: str) -> None:
 
 
 def log(logger: logging.Logger, level: int, message: str, **fields: Any) -> None:
+    """Log message with fields merged into the JSON line. Document content is not logged."""
     logger.log(level, message, extra={"fields": fields})

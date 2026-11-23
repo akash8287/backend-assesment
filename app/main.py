@@ -1,3 +1,5 @@
+"""Application factory, request logging, and the dependency health check."""
+
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -20,11 +22,18 @@ logger = logging.getLogger(__name__)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    """Build the API, connect its datastores, and start the pipeline worker.
+
+    MongoDB must answer before startup finishes. Redis being down is logged
+    and the process still serves, with cache misses and a MongoDB admission
+    count. The worker starts only when worker_enabled is true.
+    """
     settings = settings or get_settings()
     configure_logging(settings.log_level)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        """Open MongoDB and Redis, then close them when the process stops."""
         if (
             settings.pipeline_claim_lease_seconds < settings.pipeline_processing_max_seconds
             or settings.pipeline_claim_lease_seconds < settings.pipeline_enriching_max_seconds
@@ -75,6 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def log_request(request: Request, call_next):
+        """Write one JSON access log line for each request."""
         started = time.perf_counter()
         response = await call_next(request)
         log(
@@ -90,6 +100,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health(request: Request) -> JSONResponse:
+        """Report whether MongoDB and Redis each answer a ping.
+
+        Returns 200 only when both are reachable. Otherwise returns 503 and
+        names the dependency that failed.
+        """
         mongo_ok = await request.app.state.mongo.ping()
         redis_ok = False
         try:
